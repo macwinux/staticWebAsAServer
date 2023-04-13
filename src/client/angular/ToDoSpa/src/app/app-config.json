@@ -1,0 +1,22 @@
+{
+  "auth": {
+    "clientId": "{clientId}",
+    "authority": "https://login.microsoftonline.com/{authority}",
+    "validateAuthority": true,
+    "redirectUri": "https://{redirectUri}.azureedge.net",
+    "postLogoutRedirectUri": "https://{redirectUri}.azureedge.net",
+    "navigateToLoginRequestUrl": true
+  },
+  "cache": {
+      "cacheLocation": "localStorage"
+  },
+  "scopes": {
+      "loginRequest": ["openid", "profile"]
+  },
+  "resources": {
+    "todoListApi": {
+      "resourceUri": "https://{apim-uri}/todos",
+      "resourceScope": "{api-scope}"
+    }
+  }     
+}

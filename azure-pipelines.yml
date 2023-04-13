@@ -1,0 +1,111 @@
+trigger:
+  branches:
+    include:
+      - master
+  paths:
+    include:
+      - api/*
+      - biceps/*
+      - azure-pipelines.yml
+      - deploy-stage.yml
+      - scripts/vars.yml
+
+variables:
+- template: vars.yml
+
+stages:
+  - stage: Build
+    displayName: Build
+    jobs:
+    - job: 'Copy_Templates'
+      displayName: 'Copy Templates'
+      pool:
+        vmImage: $(vmImageName)
+  
+      steps:
+        
+      - task: NuGetToolInstaller@1
+      - task: NuGetCommand@2
+        inputs:
+          restoreSolution: '$(solution)'
+
+#      - task: NodeTool@0
+#        inputs:
+#          versionSpec: '14.x'
+#        displayName: 'Install Node.js'
+
+#      - script: |
+#          pushd ./src/client/angular/ToDoSpa
+#          npm install
+#          npm install -g @angular/cli
+#          ng build -c=production --output-path=$(Build.ArtifactStagingDirectory)/$(buildConfiguration)/dst
+#          popd
+#        displayName: 'npm install'
+
+      - task: CopyFiles@2
+        displayName: Copy deploy Code
+        inputs:
+          SourceFolder: '$(Build.SourcesDirectory)/deploy/'
+          Contents: '**/*'
+          TargetFolder: '$(Build.ArtifactStagingDirectory)/deploy/'
+      - task: CopyFiles@2
+        displayName: Copy project Code
+        inputs:
+          SourceFolder: '$(Build.SourcesDirectory)/src/api'
+          Contents: '**/*'
+          TargetFolder: '$(Build.ArtifactStagingDirectory)/src/api'
+      - task: CopyFiles@2
+        displayName: Copy project Code
+        inputs:
+          SourceFolder: '$(Build.SourcesDirectory)/src/client/angular/ToDoSpa'
+          Contents: '**/*'
+          TargetFolder: '$(Build.ArtifactStagingDirectory)/src/client/angular/ToDoSpa'
+      - task: UseDotNet@2
+        displayName: 'Install .net core 3.x'
+        inputs:
+          version: 3.x
+          includePreviewVersions: true
+      - task: DotNetCoreCLI@2
+        displayName: 'Restore project dependencies'
+        inputs:
+          command: 'restore'
+          projects: '$(Build.ArtifactStagingDirectory)/src/api/dotnet/ToDoFunctionApp/*.csproj'
+
+      - task: DotNetCoreCLI@2
+        displayName: 'Build the project - $(buildConfiguration)'
+        inputs:
+          command: 'build'
+          arguments: '--no-restore --configuration $(buildConfiguration)'
+          projects: '$(Build.ArtifactStagingDirectory)/src/api/dotnet/ToDoFunctionApp/*.csproj'
+
+      - task: DotNetCoreCLI@2
+        displayName: 'Publish the project - $(buildConfiguration)'
+        inputs:
+          command: 'publish'
+          projects: '$(Build.ArtifactStagingDirectory)/src/api/dotnet/ToDoFunctionApp/*.csproj'
+          publishWebProjects: false
+          arguments: '--no-build --configuration $(buildConfiguration) --output $(Build.ArtifactStagingDirectory)/$(buildConfiguration)'
+          zipAfterPublish: true
+      
+      - task: PublishBuildArtifacts@1
+        displayName: Publish Artificats
+        inputs:
+          PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+          ArtifactName: 'drop'
+          publishLocation: 'Container'
+
+  - stage: Development
+    dependsOn: Build
+    condition: succeeded()
+    displayName: Development Deploy
+    variables:
+    - group: waas-hosting
+    jobs:
+    - template: deploy-stage.yml
+      parameters:
+        vmImageName: $(vmImageName)
+        serviceConnection: $(dev.serviceConnection)
+        environment: $(dev.environment)
+        location: $(dev.location)
+        appNameSuffix: $(dev.appNameSuffix)
+        resourceGroupName: $(dev.resourceGroupName)

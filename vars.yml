@@ -1,0 +1,8 @@
+variables:
+  vmImageName: 'windows-latest'
+  buildConfiguration: 'Release'
+  dev.location: 'westeurope'
+  dev.serviceConnection: 'WAAS'
+  dev.environment: 'dev'
+  dev.appNameSuffix: 'waastest'
+  dev.resourceGroupName: 'waas'

@@ -1,0 +1,209 @@
+parameters:
+- name: resourceGroupName
+  type: string
+
+- name: location
+  type: string
+
+- name: vmImageName
+  type: string
+
+- name: appNameSuffix
+  type: string
+
+- name: environment
+  type: string
+
+- name: serviceConnection
+  type: string
+
+jobs:
+- deployment: Deploy
+  displayName: "Deploy WAAS"
+  pool:
+    vmImage: $(vmImageName)
+  environment: ${{ parameters.environment }}
+  strategy:
+    runOnce:
+      deploy:
+        steps:
+
+        - task: NuGetToolInstaller@1
+
+        - task: NuGetCommand@2
+          inputs:
+            restoreSolution: '$(solution)'
+
+        - task: AzureCLI@2
+          displayName: Create Resource Group for Managed Identity
+          inputs:
+            azureSubscription: ${{ parameters.serviceConnection }}
+            scriptLocation: 'inlineScript'
+            scriptType: 'pscore'
+            addSpnToEnvironment: true
+            inlineScript: |
+                az group create --name ${{ parameters.resourceGroupName }}  --location ${{ parameters.location }}
+
+        - task: AzureCLI@2
+          displayName: Deploy Waas Platform
+          name: waas
+          inputs:
+            azureSubscription: ${{ parameters.serviceConnection }}
+            scriptLocation: 'inlineScript'
+            scriptType: 'pscore'
+            addSpnToEnvironment: true
+            inlineScript: |
+              $waas = az deployment group create --name waas-platform --resource-group ${{ parameters.resourceGroupName }} `
+                              --template-file "$(Pipeline.Workspace)/drop/deploy/main.bicep" `
+                              --parameters appNameSuffix=${{ parameters.appNameSuffix }} environmentType=${{ parameters.environment }} `
+                              --parameters location=${{ parameters.location }} `
+                              --verbose `
+                              | ConvertFrom-Json
+
+              Write-Host "##vso[task.setvariable variable=functionAppName;isoutput=true]$($waas.properties.outputs.functionAppName.value)"
+              Write-Host "##vso[task.setvariable variable=apiUrl;isoutput=true]$($waas.properties.outputs.apiUrl.value)"
+              Write-Host "##vso[task.setvariable variable=staticWebsiteStorageAccountName;isoutput=true]$($waas.properties.outputs.staticWebsiteStorageAccountName.value)"
+              Write-Host "##vso[task.setvariable variable=staticWebsiteUrl;isoutput=true]$($waas.properties.outputs.staticWebsiteUrl.value)"
+              Write-Host "##vso[task.setvariable variable=apimName;isoutput=true]$($waas.properties.outputs.apimName.value)"
+              Write-Host "##vso[task.setvariable variable=cdnEndpointName;isoutput=true]$($waas.properties.outputs.cdnEndpointName.value)"
+              Write-Host "##vso[task.setvariable variable=cdnProfileName;isoutput=true]$($waas.properties.outputs.cdnProfileName.value)"
+              Write-Host "##vso[task.setvariable variable=cdnEndpointURL;isoutput=true]$($waas.properties.outputs.cdnEndpointURL.value)"
+
+        - task: AzureFunctionApp@1
+          displayName: 'Azure Function Deploy'
+          inputs:
+            azureSubscription: ${{ parameters.serviceConnection }}
+            appType: functionAppLinux
+            appName: 'fn-${{ parameters.appNameSuffix }}-${{ parameters.environment }}'
+            package: '$(Pipeline.Workspace)/drop/$(buildConfiguration)/*.zip'
+            runtimeStack: DOTNET|3.1
+            startUpCommand: 'func azure functionapp publish fn-${{ parameters.appNameSuffix }}-${{ parameters.environment }} --no-bundler'
+
+        - task: AzureCLI@2
+          displayName: Deploy Swagger Doc
+          inputs:
+            azureSubscription: ${{ parameters.serviceConnection }}
+            scriptLocation: 'inlineScript'
+            scriptType: 'pscore'
+            addSpnToEnvironment: true
+            inlineScript: |
+              az deployment group create --name waas-function-app --resource-group ${{ parameters.resourceGroupName }} `
+                              --template-file "$(Pipeline.Workspace)/drop/deploy/api.bicep" `
+                              --parameters apimName=$(waas.apimName) openApiUrl='https://$(waas.functionAppName).azurewebsites.net/api/swagger.json' `
+                              --parameters originUrl=$(waas.cdnEndpointURL) apimApiName='swagger' `
+                              --verbose `
+                              | ConvertFrom-Json
+
+        - task: AzureCLI@2
+          displayName: Deploy Permission web
+          name: webdep
+          inputs:
+            azureSubscription: ${{ parameters.serviceConnection }}
+            scriptLocation: 'inlineScript'
+            scriptType: 'pscore'
+            addSpnToEnvironment: true
+            inlineScript: |
+              $appRegistration = .\deploy\scripts\appRegistrationAndPermission.ps1 -clientName ${{ parameters.appNameSuffix }}${{ parameters.environment }} `
+                                                                      -apiName fn-${{ parameters.appNameSuffix }}-${{ parameters.environment }} `
+                                                                      -resourceGroup ${{ parameters.resourceGroupName }} `
+                                                                      -staticWebURL https://${{ parameters.appNameSuffix }}-${{ parameters.environment }}.azureedge.net
+            workingDirectory: $(Pipeline.Workspace)/drop/
+
+        - task: AzureCLI@2
+          displayName: Check Values
+          name: auth
+          inputs:
+            azureSubscription: ${{ parameters.serviceConnection }}
+            scriptLocation: 'inlineScript'
+            scriptType: 'pscore'
+            addSpnToEnvironment: true
+            inlineScript: |
+              echo "Var1: $(webdep.clientId)"
+              echo "Var2: $(webdep.scope)"
+              echo "Var3: $(webdep.tenantDomainName)"
+              echo "##vso[task.setvariable variable=authority;isOutput=true]$(webdep.tenantDomainName)"
+              echo "##vso[task.setvariable variable=clientId;isOutput=true]$(webdep.clientId)"
+              echo "##vso[task.setvariable variable=redirectUri;isOutput=true]$(waas.cdnEndpointURL)"
+              echo "##vso[task.setvariable variable=postLogoutRedirectUri;isOutput=true]$(waas.cdnEndpointURL)"
+
+        - task: AzureCLI@2
+          displayName: Check Values 2
+          name: resources
+          inputs:
+            azureSubscription: ${{ parameters.serviceConnection }}
+            scriptLocation: 'inlineScript'
+            scriptType: 'pscore'
+            addSpnToEnvironment: true
+            inlineScript: |
+              echo "##vso[task.setvariable variable=todoListApi.resourceScope;isOutput=true]$(webdep.scope)"
+              echo "##vso[task.setvariable variable=todoListApi.resourceUri;isOutput=true]$(waas.apiUrl)/todos"
+              echo "Var1: $(auth.authority)"
+              echo "Var1: $(auth.clientId)"
+              echo "Var1: $(auth.redirectUri)"
+              echo "Var1: $(auth.postLogoutRedirectUri)"
+
+        - task: FileTransform@2
+          displayName: Replace Variables
+          inputs:
+            folderPath: '$(Pipeline.Workspace)/drop/src/client/angular/ToDoSpa/src/app/'
+            jsonTargetFiles: 'app-config.json'
+
+        - task: NodeTool@0
+          inputs:
+            versionSpec: '14.x'
+          displayName: 'Install Node.js'
+
+#        - script: |
+#            echo "install angular cli"
+#            npm install -g @angular/cli
+#            npm install
+#            ng build -c=production --output-path=./dst
+#            popd
+#          displayName: 'npm install'
+#          workingDirectory: $(Pipeline.Workspace)/drop/src/client/angular/ToDoSpa
+        - task: NodeTool@0
+          inputs:
+            versionSpec: '14.x'
+          displayName: 'Install Node.js'
+
+        - task: Npm@1  
+          displayName: 'Angular CLI 13.2.5'  
+          inputs:  
+            command: custom  
+            verbose: false  
+            customCommand: 'install -g @angular/cli'
+            workingDir: $(Pipeline.Workspace)/drop/src/client/angular/ToDoSpa
+
+        - task: Npm@1  
+          displayName: 'npm install' 
+          inputs:
+            command: custom  
+            customCommand: 'install'  
+            workingDir: $(Pipeline.Workspace)/drop/src/client/angular/ToDoSpa 
+
+        - task: Npm@1  
+          displayName: Build 
+          inputs: 
+            command: custom  
+            verbose: false  
+            customCommand: 'run build -c=production --output-path=./dst'
+            workingDir: $(Pipeline.Workspace)/drop/src/client/angular/ToDoSpa 
+        - task: AzureCLI@2
+          displayName: Publish static website to Azure storage account
+          inputs:
+            azureSubscription: ${{ parameters.serviceConnection }}
+            scriptLocation: 'inlineScript'
+            scriptType: 'pscore'
+            addSpnToEnvironment: true
+            inlineScript: |
+              az storage blob upload-batch -s $(Pipeline.Workspace)/drop/src/client/angular/ToDoSpa/dst -d '$web' --account-name ${{ parameters.appNameSuffix }}${{ parameters.environment }} --overwrite true
+#
+#        - task: AzureCLI@2
+#          displayName: Purge CDN endpoint
+#          inputs:
+#            azureSubscription: ${{ parameters.serviceConnection }}
+#            scriptLocation: 'inlineScript'
+#            scriptType: 'pscore'
+#            addSpnToEnvironment: true
+#            inlineScript: |
+#              az cdn endpoint purge --content-paths  "/*" --profile-name $(waas.cdnProfileName) --name $(waas.cdnEndpointName) --resource-group ${{ parameters.resourceGroupName }}
